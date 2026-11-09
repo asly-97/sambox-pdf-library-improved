@@ -1,0 +1,16 @@
+--- a/src/main/java/org/sejda/sambox/pdmodel/interactive/form/PDAcroForm.java
++++ b/src/main/java/org/sejda/sambox/pdmodel/interactive/form/PDAcroForm.java
+@@ -309,7 +309,12 @@
+      */
+     public List<PDField> getFields()
+     {
+-        return fieldsFromArray(getCOSObject().getDictionaryObject(COSName.FIELDS, COSArray.class));
++        COSArray fields = getCOSObject().getDictionaryObject(COSName.FIELDS, COSArray.class);
++        if (isNull(fields))
++        {
++            return new COSArrayList<>(getCOSObject(), COSName.FIELDS);
++        }
++        return new COSArrayList<>(fieldsFromArray(fields), fields);
+     }
+ 
+     private List<PDField> fieldsFromArray(COSArray array)

@@ -1,0 +1,196 @@
+diff --git a/src/main/java/org/sejda/sambox/pdmodel/PDPageTree.java b/src/main/java/org/sejda/sambox/pdmodel/PDPageTree.java
+index 44adbc0..c15d8e5 100644
+--- a/src/main/java/org/sejda/sambox/pdmodel/PDPageTree.java
++++ b/src/main/java/org/sejda/sambox/pdmodel/PDPageTree.java
+@@ -23,11 +23,17 @@ import static java.util.stream.Collectors.toList;
+ import static org.sejda.commons.util.RequireUtils.require;
+ import static org.sejda.commons.util.RequireUtils.requireNotNullArg;
+ 
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
+ import java.util.ArrayDeque;
++import java.util.Collections;
++import java.util.IdentityHashMap;
+ import java.util.ArrayList;
+ import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.List;
++import java.util.Map;
+ import java.util.NoSuchElementException;
+ import java.util.Objects;
+ import java.util.Queue;
+@@ -43,7 +49,9 @@ import org.sejda.sambox.cos.COSDictionary;
+ import org.sejda.sambox.cos.COSInteger;
+ import org.sejda.sambox.cos.COSName;
+ import org.sejda.sambox.cos.COSNull;
++import org.sejda.sambox.cos.COSNumber;
+ import org.sejda.sambox.cos.COSObjectable;
++import org.sejda.sambox.cos.COSStream;
+ import org.sejda.sambox.util.ObjectIdUtils;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -586,6 +594,116 @@ public class PDPageTree implements COSObjectable, Iterable<PDPage>
+         }
+     }
+ 
++
++    /**
++     * Stores the inheritable attribute identified by the given key on the
++     * given page dictionary, resolved through the page tree the page is
++     * currently part of, but only when the page does not define the
++     * attribute itself. Nothing is stored when no ancestor defines it
++     * either, so spec fallbacks (e.g. CropBox defaulting to MediaBox) keep
++     * being derived rather than frozen into a stored value.
++     */
++    private static void materializeInheritable(COSDictionary node, COSName key)
++    {
++        if (node.getDictionaryObject(key) == null)
++        {
++            COSBase value = getInheritableAttribute(node, key);
++            if (value instanceof COSArray)
++            {
++                COSArray copy = new COSArray();
++                copy.addAll((COSArray) value);
++                node.setItem(key, copy);
++            }
++        }
++    }
++
++    /**
++     * Copies a COS structure: dictionaries and arrays are duplicated
++     * (recursively), every other value is shared. Used so a data structure
++     * taken over from another document stops aliasing the source's mutable
++     * dictionaries while its leaf objects keep being ordinary references
++     * the writer copies into the new file.
++     */
++    private static COSBase deepCopy(COSBase value)
++    {
++        return deepCopy(value,
++                Collections.newSetFromMap(new IdentityHashMap<>()));
++    }
++
++    private static COSBase deepCopy(COSBase value, Set<COSBase> visited)
++    {
++        // entries of a parsed dictionary are usually indirect references
++        // (COSObject) to the actual dictionary or array; copying must
++        // follow the reference and duplicate what it points at, otherwise
++        // the copy still aliases the source's dictionaries
++        COSBase unwrapped = value.getCOSObject();
++        if (unwrapped instanceof COSStream)
++        {
++            // a stream is a dictionary plus data the writer reads back
++            // from wherever the stream was parsed; copying only the
++            // dictionary entries would produce a dictionary without the
++            // data. Copy the entries (minus the ones describing the
++            // source's stored bytes) and the decoded data itself, eagerly,
++            // while the source document is still open.
++            if (!visited.add(unwrapped))
++            {
++                return unwrapped;
++            }
++            COSStream sourceStream = (COSStream) unwrapped;
++            COSStream copy = new COSStream();
++            for (Map.Entry<COSName, COSBase> entry : sourceStream.entrySet())
++            {
++                COSName key = entry.getKey();
++                if (COSName.LENGTH.equals(key) || COSName.FILTER.equals(key)
++                        || COSName.DECODE_PARMS.equals(key) || COSName.F.equals(key)
++                        || COSName.F_FILTER.equals(key)
++                        || COSName.F_DECODE_PARMS.equals(key) || COSName.DL.equals(key))
++                {
++                    continue;
++                }
++                copy.setItem(key, deepCopy(entry.getValue(), visited));
++            }
++            try (InputStream in = sourceStream.getUnfilteredStream();
++                    OutputStream out = copy.createUnfilteredStream())
++            {
++                in.transferTo(out);
++            }
++            catch (IOException e)
++            {
++                throw new IllegalStateException("Failed to copy stream data", e);
++            }
++            return copy;
++        }
++        if (unwrapped instanceof COSDictionary)
++        {
++            if (!visited.add(unwrapped))
++            {
++                return unwrapped;
++            }
++            COSDictionary copy = new COSDictionary();
++            for (Map.Entry<COSName, COSBase> entry : ((COSDictionary) unwrapped)
++                    .entrySet())
++            {
++                copy.setItem(entry.getKey(), deepCopy(entry.getValue(), visited));
++            }
++            return copy;
++        }
++        if (unwrapped instanceof COSArray)
++        {
++            if (!visited.add(unwrapped))
++            {
++                return unwrapped;
++            }
++            COSArray copy = new COSArray();
++            for (COSBase item : (COSArray) unwrapped)
++            {
++                copy.add(deepCopy(item, visited));
++            }
++            return copy;
++        }
++        return value;
++    }
++
+     /**
+      * Adds the given page to this page tree.
+      *
+@@ -593,8 +711,45 @@ public class PDPageTree implements COSObjectable, Iterable<PDPage>
+      */
+     public void add(PDPage page)
+     {
+-        // set parent
+         COSDictionary node = page.getCOSObject();
++
++        // A page can inherit MediaBox, CropBox, Rotate and Resources from
++        // its page-tree ancestors. Everything it does not define itself has
++        // to be resolved from the tree it is leaving and stored on the page,
++        // so the page arrives whole in its new document.
++        materializeInheritable(node, COSName.MEDIA_BOX);
++        materializeInheritable(node, COSName.CROP_BOX);
++        if (node.getDictionaryObject(COSName.ROTATE) == null)
++        {
++            COSBase rotate = getInheritableAttribute(node, COSName.ROTATE);
++            if (rotate instanceof COSNumber)
++            {
++                node.setInt(COSName.ROTATE, ((COSNumber) rotate).intValue());
++            }
++        }
++        if (node.getDictionaryObject(COSName.RESOURCES) == null)
++        {
++            COSBase resources = getInheritableAttribute(node, COSName.RESOURCES);
++            if (resources instanceof COSDictionary)
++            {
++                // carry a copy, never the source tree's own dictionary: the
++                // moved page must not observe later edits made through the
++                // source document
++                page.setResources(new PDResources(
++                        (COSDictionary) deepCopy(resources)));
++            }
++        }
++        // The page's own content stream can be a parsed stream whose
++        // bytes are read back from the source file on demand; hand the
++        // page an eagerly copied stream so the page survives the source
++        // document being closed.
++        COSBase contents = node.getDictionaryObject(COSName.CONTENTS);
++        if (contents != null)
++        {
++            node.setItem(COSName.CONTENTS, deepCopy(contents));
++        }
++
++        // set parent
+         node.setItem(COSName.PARENT, root);
+ 
+         // todo: re-balance tree? (or at least group new pages into tree nodes of e.g. 20)
