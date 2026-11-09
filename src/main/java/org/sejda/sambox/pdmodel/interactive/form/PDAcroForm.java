@@ -309,7 +309,12 @@ public final class PDAcroForm extends PDDictionaryWrapper
      */
     public List<PDField> getFields()
     {
-        return fieldsFromArray(getCOSObject().getDictionaryObject(COSName.FIELDS, COSArray.class));
+        COSArray fields = getCOSObject().getDictionaryObject(COSName.FIELDS, COSArray.class);
+        if (isNull(fields))
+        {
+            return new COSArrayList<>(getCOSObject(), COSName.FIELDS);
+        }
+        return new COSArrayList<>(fieldsFromArray(fields), fields);
     }
 
     private List<PDField> fieldsFromArray(COSArray array)
