@@ -542,7 +542,19 @@ public class PDPageTree implements COSObjectable, Iterable<PDPage>
      */
     public void remove(PDPage page)
     {
-        remove(page.getCOSObject());
+        COSDictionary knownParent = page.getPageTreeParent();
+        if (knownParent == null)
+        {
+            // pages obtained without traversing the tree (e.g. from the iterator) do not
+            // carry a traversal parent; discover it the same way remove(int) does, so the
+            // worker's broken-document fallbacks receive the parent they were written for
+            int index = indexOf(page);
+            if (index >= 0)
+            {
+                knownParent = get(index + 1, root, 0, null, new HashSet<>()).parent;
+            }
+        }
+        remove(page.getCOSObject(), knownParent);
     }
 
     /**
