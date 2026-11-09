@@ -73,6 +73,12 @@ class XrefParser
             @Override
             void onEntryFound(XrefEntry entry)
             {
+                if(entry.getByteOffset() < XrefEntry.UNKNOWN_OFFSET)
+                {
+                    // throw an error instead of silently skipping to force the XrefFullScanner
+                    throw new IllegalArgumentException("XrefEntry with negative byteOffset: " + entry.getByteOffset());
+                }
+
                 parser().provider().addEntryIfAbsent(entry);
             }
         };
